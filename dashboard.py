@@ -17,11 +17,11 @@ from plotly.subplots import make_subplots
 # ------------------------- Page config & theming -------------------------
 st.set_page_config(page_title="DVD Rental Analytics", layout="wide", initial_sidebar_state="expanded")
 
-# Dark-only theme (system font stack for reliability)
+# Dark-only theme CSS (do NOT set fonts here — let Streamlit handle fonts)
 DARK_CSS = """
 <style>
-.stApp, .stApp * { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol" !important; color: #e6eef8; }
-.stApp { background-color: #071226; }
+/* keep styling minimal and avoid forcing fonts */
+.stApp { background-color: #071226; color: #e6eef8; }
 .card { background: linear-gradient(180deg,#08101a,#0d1b2a); padding:10px; border-radius:10px; box-shadow: 0 2px 8px rgba(0,0,0,0.6); }
 .compact-metric { font-size:18px; font-weight:700; color:#e6eef8; }
 .small-muted { color:#aebdcc; font-size:13px; }
@@ -101,7 +101,6 @@ def folder_has_csvs(folder_path: str) -> bool:
 
 should_auto_load = folder_has_csvs(folder) and not load_button
 
-
 # ------------------------- Saved SQL queries (all 25) -------------------------
 SAVED_QUERIES = {
     '1. Top 3 Spenders': textwrap.dedent("""
@@ -116,7 +115,6 @@ SAVED_QUERIES = {
           ORDER BY total_spent DESC
           LIMIT 3
         ) AS derived_table;"""),
-
     '2. Monthly Rentals per Store': textwrap.dedent("""
         SELECT s.store_id, strftime(CAST(r.rental_date AS TIMESTAMP), '%Y') AS rental_year, strftime(CAST(r.rental_date AS TIMESTAMP), '%m') AS rental_month, COUNT(r.rental_id) AS rental_count
         FROM rental r
@@ -124,7 +122,6 @@ SAVED_QUERIES = {
         JOIN store s ON st.store_id = s.store_id
         GROUP BY s.store_id, rental_year, rental_month
         ORDER BY s.store_id, rental_year, rental_month;"""),
-
     '3. Film Categories & Rental Durations (quartiles)': textwrap.dedent("""
         WITH t1 AS (
             SELECT f.title AS film_title, c.name AS category_name, ntile(4) OVER (ORDER BY COALESCE(f.rental_duration,0)) AS standard_quartile
@@ -137,7 +134,6 @@ SAVED_QUERIES = {
         WHERE category_name IN ('Animation', 'Children', 'Classics', 'Comedy', 'Family', 'Music')
         GROUP BY category_name, standard_quartile
         ORDER BY category_name, standard_quartile;"""),
-
     '4. Top 10 Paying Customers Payment Patterns': textwrap.dedent("""
         WITH top_paying_customers AS (
             SELECT c.customer_id, (c.first_name || ' ' || c.last_name) AS customer_name, SUM(p.amount) AS total_payment
@@ -152,7 +148,6 @@ SAVED_QUERIES = {
         JOIN top_paying_customers tpc ON p.customer_id = tpc.customer_id
         GROUP BY tpc.customer_name, payment_month
         ORDER BY tpc.customer_name, payment_month;"""),
-
     '5. Family Movie Rental Counts': textwrap.dedent("""
         WITH t1 AS (
             SELECT f.title AS film_title, c.name AS category_name, r.rental_id
@@ -167,7 +162,6 @@ SAVED_QUERIES = {
         WHERE category_name IN ('Animation', 'Children', 'Classics', 'Comedy', 'Family', 'Music')
         GROUP BY film_title, category_name
         ORDER BY category_name, film_title;"""),
-
     '6. Peak Activity by Store (monthly)': textwrap.dedent("""
         WITH result_table AS (
             SELECT strftime(CAST(r.rental_date AS TIMESTAMP), '%Y') AS year, strftime(CAST(r.rental_date AS TIMESTAMP), '%m') AS rental_month, st.store_id, COUNT(r.rental_id) AS rental_count
@@ -181,7 +175,6 @@ SAVED_QUERIES = {
         FROM result_table
         GROUP BY year, rental_month
         ORDER BY year, rental_month;"""),
-
     '7. Family-friendly film orders (counts)': textwrap.dedent("""
         WITH result_table AS (
             SELECT f.title AS film_title, cat.name AS category_name, COUNT(re.rental_id) AS num_rentals
@@ -194,7 +187,6 @@ SAVED_QUERIES = {
             GROUP BY film_title, category_name
         )
         SELECT * FROM result_table;"""),
-
     '8. Total Revenue by Category': textwrap.dedent("""
         SELECT category.name AS category_name, SUM(payment.amount) AS total_revenue
         FROM category
@@ -205,14 +197,12 @@ SAVED_QUERIES = {
         JOIN payment ON rental.rental_id = payment.rental_id
         GROUP BY category.name
         ORDER BY total_revenue DESC;"""),
-
     '9. Total Rentals & Avg Rental Rate per Customer': textwrap.dedent("""
         SELECT customer.first_name, customer.last_name, customer.email, COUNT(rental.rental_id) AS total_rentals, AVG(payment.amount) AS average_rental_rate
         FROM customer
         LEFT JOIN rental ON customer.customer_id = rental.customer_id
         LEFT JOIN payment ON rental.rental_id = payment.rental_id
         GROUP BY customer.first_name, customer.last_name, customer.email;"""),
-
     '10. Highly Rented Films (>30)': textwrap.dedent("""
         SELECT film.title, COUNT(DISTINCT rental.rental_id) AS rental_count
         FROM film
@@ -221,7 +211,6 @@ SAVED_QUERIES = {
         GROUP BY film.title
         HAVING rental_count > 30
         ORDER BY rental_count DESC;"""),
-
     '11. City Rental Rates (avg)': textwrap.dedent("""
         WITH CityRentalRates AS (
             SELECT city.city_id, city.city, AVG(payment.amount) AS avg_rental_rate
@@ -239,7 +228,6 @@ SAVED_QUERIES = {
                     WHEN cr.avg_rental_rate = mmr.min_rate THEN 'Lowest Rate'
                     ELSE 'Standard Rate' END AS rate_status
         FROM CityRentalRates cr CROSS JOIN MaxMinRates mmr;"""),
-
     '12. Top customers by unique films rented (top 3)': textwrap.dedent("""
         SELECT customer.customer_id, customer.first_name, customer.last_name, customer.email, COUNT(DISTINCT rental.inventory_id) AS unique_films_rented
         FROM customer
@@ -247,13 +235,11 @@ SAVED_QUERIES = {
         GROUP BY customer.customer_id, customer.first_name, customer.last_name, customer.email
         ORDER BY unique_films_rented DESC
         LIMIT 3;"""),
-
     '13. Monthly Revenue Trends': textwrap.dedent("""
         SELECT strftime(CAST(payment.payment_date AS TIMESTAMP), '%Y-%m') AS payment_month, SUM(payment.amount) AS monthly_revenue
         FROM payment
         GROUP BY payment_month
         ORDER BY payment_month;"""),
-
     '14. Most Active Stores (top 5)': textwrap.dedent("""
         SELECT store.store_id, COUNT(rental.rental_id) AS total_rentals
         FROM store
@@ -262,7 +248,6 @@ SAVED_QUERIES = {
         GROUP BY store.store_id
         ORDER BY total_rentals DESC
         LIMIT 5;"""),
-
     '15. Customer Lifetime Value (top 5)': textwrap.dedent("""
         SELECT customer.customer_id, customer.first_name, customer.last_name, COUNT(rental.rental_id) AS total_rentals, SUM(payment.amount) AS total_spent
         FROM customer
@@ -271,7 +256,6 @@ SAVED_QUERIES = {
         GROUP BY customer.customer_id, customer.first_name, customer.last_name
         ORDER BY total_spent DESC
         LIMIT 5;"""),
-
     '16. Loyalty Tiers by Rental Frequency': textwrap.dedent("""
         SELECT customer.customer_id, customer.first_name, customer.last_name, COUNT(rental.rental_id) AS total_rentals,
                CASE WHEN COUNT(rental.rental_id) >= 50 THEN 'Platinum'
@@ -281,7 +265,6 @@ SAVED_QUERIES = {
         LEFT JOIN rental ON customer.customer_id = rental.customer_id
         GROUP BY customer.customer_id, customer.first_name, customer.last_name
         ORDER BY total_rentals DESC;"""),
-
     '17. Monthly Revenue Growth Rate': textwrap.dedent("""
         WITH MonthlyRevenue AS (
             SELECT strftime(CAST(payment_date AS TIMESTAMP), '%Y-%m') AS payment_month, SUM(amount) AS monthly_revenue
@@ -294,7 +277,6 @@ SAVED_QUERIES = {
             FROM MonthlyRevenue
         )
         SELECT payment_month, monthly_revenue, IFNULL(growth_rate, 0) AS growth_rate FROM RevenueGrowth;"""),
-
     '18. Revenue, Cost & ROI by Category': textwrap.dedent("""
         SELECT fc.category_id, c.name AS category_name, SUM(payment.amount) AS total_revenue,
                SUM(f.rental_duration * payment.amount) AS total_cost,
@@ -308,7 +290,6 @@ SAVED_QUERIES = {
         JOIN category c ON fc.category_id = c.category_id
         GROUP BY fc.category_id, c.name
         ORDER BY profit DESC;"""),
-
     '19. Rental Patterns Over Time': textwrap.dedent("""
         WITH RentalPatterns AS (
             SELECT strftime(CAST(rental_date AS TIMESTAMP), '%Y-%m') AS rental_month, COUNT(rental_id) AS rental_count
@@ -318,7 +299,6 @@ SAVED_QUERIES = {
         SELECT rental_month, rental_count, LAG(rental_count) OVER (ORDER BY rental_month) AS prev_rental_count,
                (rental_count - LAG(rental_count) OVER (ORDER BY rental_month)) AS rental_growth
         FROM RentalPatterns;"""),
-
     '20. Late Returns Impact on Revenue': textwrap.dedent("""
         SELECT CASE WHEN date_diff('day', CAST(r.rental_date AS DATE), CAST(r.return_date AS DATE)) > f.rental_duration THEN 'Late' ELSE 'On Time' END AS return_status,
                COUNT(r.rental_id) AS rental_count, SUM(p.amount) AS total_revenue
@@ -327,7 +307,6 @@ SAVED_QUERIES = {
         JOIN inventory i ON r.inventory_id = i.inventory_id
         JOIN film f ON i.film_id = f.film_id
         GROUP BY return_status;"""),
-
     '21. Most Popular Genres by Rentals': textwrap.dedent("""
         SELECT category.name AS genre, COUNT(rental.rental_id) AS rental_count
         FROM rental
@@ -336,14 +315,12 @@ SAVED_QUERIES = {
         JOIN film_category ON film.film_id = film_category.film_id
         JOIN category ON film_category.category_id = category.category_id
         GROUP BY genre ORDER BY rental_count DESC;"""),
-
     '22. Return Patterns by Day of Week': textwrap.dedent("""
         SELECT DAYNAME(return_date) AS day_of_week, COUNT(rental_id) AS rental_count
         FROM rental
         WHERE return_date IS NOT NULL
         GROUP BY day_of_week
         ORDER BY FIELD(day_of_week, 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday');"""),
-
     '23. Revenue by City': textwrap.dedent("""
         SELECT city.city, SUM(payment.amount) AS total_revenue
         FROM payment
@@ -354,7 +331,6 @@ SAVED_QUERIES = {
         JOIN city ON address.city_id = city.city_id
         GROUP BY city.city
         ORDER BY total_revenue DESC;"""),
-
     '24. Most Profitable Actors': textwrap.dedent("""
         SELECT a.actor_id, a.first_name, a.last_name, SUM(payment.amount) AS total_revenue
         FROM actor a
@@ -365,7 +341,6 @@ SAVED_QUERIES = {
         JOIN payment ON rental.rental_id = payment.rental_id
         GROUP BY a.actor_id, a.first_name, a.last_name
         ORDER BY total_revenue DESC;"""),
-
     '25. Film Availability & Demand (top 500)': textwrap.dedent("""
         SELECT f.title AS film_title, COUNT(i.inventory_id) AS available_copies, COUNT(r.rental_id) AS rental_count
         FROM film f
@@ -375,7 +350,6 @@ SAVED_QUERIES = {
         ORDER BY rental_count DESC, available_copies DESC
         LIMIT 500;"""),
 }
-
 
 # ------------------------- Main app logic -------------------------
 if load_button or should_auto_load:
@@ -467,10 +441,8 @@ if load_button or should_auto_load:
             st.subheader("Top customers — table")
             st.dataframe(df_top.head(max_rows_preview))
             if not df_top.empty:
-                fig = px.bar(df_top.head(25), x='total_spent', y='fullname', orientation='h', title='Top 25 customers by spend')
-                safe_plotly(fig)
-                fig_hist = px.histogram(df_top, x='total_spent', nbins=30, title='Distribution of total spent (top customers)')
-                safe_plotly(fig_hist)
+                safe_plotly(px.bar(df_top.head(25), x='total_spent', y='fullname', orientation='h', title='Top 25 customers by spend'))
+                safe_plotly(px.histogram(df_top, x='total_spent', nbins=30, title='Distribution of total spent (top customers)'))
                 df_pareto = df_top.sort_values('total_spent', ascending=False).reset_index(drop=True)
                 df_pareto['cum_pct'] = df_pareto['total_spent'].cumsum() / df_pareto['total_spent'].sum()
                 fig_p = make_subplots(specs=[[{"secondary_y": True}]])
