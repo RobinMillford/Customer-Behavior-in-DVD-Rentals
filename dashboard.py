@@ -1,7 +1,3 @@
-# streamlit_dvd_dashboard.py
-# Modern interactive Streamlit dashboard for the DVD rental dataset folder
-# Uses: pandas, duckdb, plotly, plotly.express, streamlit
-
 import os
 import glob
 import textwrap
@@ -380,7 +376,7 @@ if load_button or should_auto_load:
         return None
 
     # main UI
-    st.title("📊 DVD Rental — Interactive Analytics Dashboard (Dark Mode)")
+    st.title("📊 DVD Rental — Interactive Analytics Dashboard")
 
     # Header/cards
     col1, col2, col3, col4 = st.columns(4)
