@@ -1,7 +1,7 @@
 import os
 import glob
 import textwrap
-from typing import Dict
+from typing import Dict, Optional
 
 import pandas as pd
 import duckdb
@@ -13,7 +13,7 @@ from plotly.subplots import make_subplots
 # ------------------------- Page config & theming -------------------------
 st.set_page_config(page_title="DVD Rental Analytics", layout="wide", initial_sidebar_state="expanded")
 
-# Dark-only theme CSS (do NOT set fonts here — let Streamlit handle fonts)
+# Dark-only theme CSS (keep styling minimal and don't force fonts)
 DARK_CSS = """
 <style>
 /* keep styling minimal and avoid forcing fonts */
@@ -28,45 +28,73 @@ st.markdown(DARK_CSS, unsafe_allow_html=True)
 # ------------------------- Helpers -------------------------
 @st.cache_data(show_spinner=False)
 def load_csvs_from_folder(folder_path: str) -> Dict[str, pd.DataFrame]:
+    """Load all CSV files in a folder and return a dict of DataFrames keyed by filename (without extension)."""
     files = glob.glob(os.path.join(folder_path, "*.csv"))
     dfs: Dict[str, pd.DataFrame] = {}
-    for f in files:
-        key = os.path.splitext(os.path.basename(f))[0]
+    for fpath in files:
+        key = os.path.splitext(os.path.basename(fpath))[0]
         try:
-            df = pd.read_csv(f, low_memory=False)
+            df = pd.read_csv(fpath, low_memory=False)
         except Exception:
-            df = pd.read_csv(f, engine="python")
+            # fallback parser if there are parsing oddities
+            df = pd.read_csv(fpath, engine="python")
         dfs[key] = df
     return dfs
 
 
 def coerce_date_columns(dfs: Dict[str, pd.DataFrame], sample_size: int = 2000, threshold: float = 0.6) -> Dict[str, pd.DataFrame]:
-    coerced = {}
+    """Auto-detect and coerce likely date columns to pandas datetime."""
+    coerced: Dict[str, pd.DataFrame] = {}
     for name, df in dfs.items():
         df = df.copy()
         for col in df.columns:
-            col_low = col.lower()
-            if 'date' in col_low or df[col].dtype == object:
-                sample = df[col].dropna().astype(str).head(sample_size)
-                if sample.empty:
-                    continue
-                parsed = pd.to_datetime(sample, errors='coerce', infer_datetime_format=True)
-                success_rate = parsed.notna().sum() / len(parsed)
-                if success_rate >= threshold:
-                    df[col] = pd.to_datetime(df[col], errors='coerce', infer_datetime_format=True)
+            try:
+                col_low = str(col).lower()
+                if 'date' in col_low or df[col].dtype == object:
+                    sample = df[col].dropna().astype(str).head(sample_size)
+                    if sample.empty:
+                        continue
+                    parsed = pd.to_datetime(sample, errors='coerce', infer_datetime_format=True)
+                    success_rate = parsed.notna().sum() / len(parsed)
+                    if success_rate >= threshold:
+                        df[col] = pd.to_datetime(df[col], errors='coerce', infer_datetime_format=True)
+            except Exception:
+                # if coercion causes issues, skip column
+                continue
         coerced[name] = df
     return coerced
 
 
 def create_duckdb_connection(dfs: Dict[str, pd.DataFrame]):
+    """
+    Create an in-memory duckdb connection and register pandas tables.
+
+    Registers each DataFrame under:
+      - its original key (filename without extension)
+      - a sanitized lowercase name with spaces -> underscores
+
+    This increases resilience vs. naming mismatches.
+    """
     con = duckdb.connect(database=':memory:')
     for name, df in dfs.items():
+        # register original name if valid
+        try:
+            con.register(name, df)
+        except Exception:
+            # ignore if duckdb rejects the name
+            pass
+
+        # register sanitized name
         table_name = name.lower().replace(' ', '_')
-        con.register(table_name, df)
+        try:
+            con.register(table_name, df)
+        except Exception:
+            pass
     return con
 
 
 def run_sql(con, sql: str) -> pd.DataFrame:
+    """Execute SQL on DuckDB connection and return a DataFrame. Errors are shown in the app."""
     try:
         return con.execute(sql).df()
     except Exception as e:
@@ -75,6 +103,7 @@ def run_sql(con, sql: str) -> pd.DataFrame:
 
 
 def safe_plotly(fig):
+    """Plotly wrapper that shows plot errors in the UI if they occur."""
     try:
         st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
@@ -111,6 +140,7 @@ SAVED_QUERIES = {
           ORDER BY total_spent DESC
           LIMIT 3
         ) AS derived_table;"""),
+
     '2. Monthly Rentals per Store': textwrap.dedent("""
         SELECT s.store_id, strftime(CAST(r.rental_date AS TIMESTAMP), '%Y') AS rental_year, strftime(CAST(r.rental_date AS TIMESTAMP), '%m') AS rental_month, COUNT(r.rental_id) AS rental_count
         FROM rental r
@@ -118,6 +148,7 @@ SAVED_QUERIES = {
         JOIN store s ON st.store_id = s.store_id
         GROUP BY s.store_id, rental_year, rental_month
         ORDER BY s.store_id, rental_year, rental_month;"""),
+
     '3. Film Categories & Rental Durations (quartiles)': textwrap.dedent("""
         WITH t1 AS (
             SELECT f.title AS film_title, c.name AS category_name, ntile(4) OVER (ORDER BY COALESCE(f.rental_duration,0)) AS standard_quartile
@@ -130,6 +161,7 @@ SAVED_QUERIES = {
         WHERE category_name IN ('Animation', 'Children', 'Classics', 'Comedy', 'Family', 'Music')
         GROUP BY category_name, standard_quartile
         ORDER BY category_name, standard_quartile;"""),
+
     '4. Top 10 Paying Customers Payment Patterns': textwrap.dedent("""
         WITH top_paying_customers AS (
             SELECT c.customer_id, (c.first_name || ' ' || c.last_name) AS customer_name, SUM(p.amount) AS total_payment
@@ -144,6 +176,7 @@ SAVED_QUERIES = {
         JOIN top_paying_customers tpc ON p.customer_id = tpc.customer_id
         GROUP BY tpc.customer_name, payment_month
         ORDER BY tpc.customer_name, payment_month;"""),
+
     '5. Family Movie Rental Counts': textwrap.dedent("""
         WITH t1 AS (
             SELECT f.title AS film_title, c.name AS category_name, r.rental_id
@@ -158,6 +191,7 @@ SAVED_QUERIES = {
         WHERE category_name IN ('Animation', 'Children', 'Classics', 'Comedy', 'Family', 'Music')
         GROUP BY film_title, category_name
         ORDER BY category_name, film_title;"""),
+
     '6. Peak Activity by Store (monthly)': textwrap.dedent("""
         WITH result_table AS (
             SELECT strftime(CAST(r.rental_date AS TIMESTAMP), '%Y') AS year, strftime(CAST(r.rental_date AS TIMESTAMP), '%m') AS rental_month, st.store_id, COUNT(r.rental_id) AS rental_count
@@ -171,6 +205,7 @@ SAVED_QUERIES = {
         FROM result_table
         GROUP BY year, rental_month
         ORDER BY year, rental_month;"""),
+
     '7. Family-friendly film orders (counts)': textwrap.dedent("""
         WITH result_table AS (
             SELECT f.title AS film_title, cat.name AS category_name, COUNT(re.rental_id) AS num_rentals
@@ -183,6 +218,7 @@ SAVED_QUERIES = {
             GROUP BY film_title, category_name
         )
         SELECT * FROM result_table;"""),
+
     '8. Total Revenue by Category': textwrap.dedent("""
         SELECT category.name AS category_name, SUM(payment.amount) AS total_revenue
         FROM category
@@ -193,12 +229,14 @@ SAVED_QUERIES = {
         JOIN payment ON rental.rental_id = payment.rental_id
         GROUP BY category.name
         ORDER BY total_revenue DESC;"""),
+
     '9. Total Rentals & Avg Rental Rate per Customer': textwrap.dedent("""
         SELECT customer.first_name, customer.last_name, customer.email, COUNT(rental.rental_id) AS total_rentals, AVG(payment.amount) AS average_rental_rate
         FROM customer
         LEFT JOIN rental ON customer.customer_id = rental.customer_id
         LEFT JOIN payment ON rental.rental_id = payment.rental_id
         GROUP BY customer.first_name, customer.last_name, customer.email;"""),
+
     '10. Highly Rented Films (>30)': textwrap.dedent("""
         SELECT film.title, COUNT(DISTINCT rental.rental_id) AS rental_count
         FROM film
@@ -207,6 +245,7 @@ SAVED_QUERIES = {
         GROUP BY film.title
         HAVING rental_count > 30
         ORDER BY rental_count DESC;"""),
+
     '11. City Rental Rates (avg)': textwrap.dedent("""
         WITH CityRentalRates AS (
             SELECT city.city_id, city.city, AVG(payment.amount) AS avg_rental_rate
@@ -224,6 +263,7 @@ SAVED_QUERIES = {
                     WHEN cr.avg_rental_rate = mmr.min_rate THEN 'Lowest Rate'
                     ELSE 'Standard Rate' END AS rate_status
         FROM CityRentalRates cr CROSS JOIN MaxMinRates mmr;"""),
+
     '12. Top customers by unique films rented (top 3)': textwrap.dedent("""
         SELECT customer.customer_id, customer.first_name, customer.last_name, customer.email, COUNT(DISTINCT rental.inventory_id) AS unique_films_rented
         FROM customer
@@ -231,11 +271,13 @@ SAVED_QUERIES = {
         GROUP BY customer.customer_id, customer.first_name, customer.last_name, customer.email
         ORDER BY unique_films_rented DESC
         LIMIT 3;"""),
+
     '13. Monthly Revenue Trends': textwrap.dedent("""
         SELECT strftime(CAST(payment.payment_date AS TIMESTAMP), '%Y-%m') AS payment_month, SUM(payment.amount) AS monthly_revenue
         FROM payment
         GROUP BY payment_month
         ORDER BY payment_month;"""),
+
     '14. Most Active Stores (top 5)': textwrap.dedent("""
         SELECT store.store_id, COUNT(rental.rental_id) AS total_rentals
         FROM store
@@ -244,6 +286,7 @@ SAVED_QUERIES = {
         GROUP BY store.store_id
         ORDER BY total_rentals DESC
         LIMIT 5;"""),
+
     '15. Customer Lifetime Value (top 5)': textwrap.dedent("""
         SELECT customer.customer_id, customer.first_name, customer.last_name, COUNT(rental.rental_id) AS total_rentals, SUM(payment.amount) AS total_spent
         FROM customer
@@ -252,6 +295,7 @@ SAVED_QUERIES = {
         GROUP BY customer.customer_id, customer.first_name, customer.last_name
         ORDER BY total_spent DESC
         LIMIT 5;"""),
+
     '16. Loyalty Tiers by Rental Frequency': textwrap.dedent("""
         SELECT customer.customer_id, customer.first_name, customer.last_name, COUNT(rental.rental_id) AS total_rentals,
                CASE WHEN COUNT(rental.rental_id) >= 50 THEN 'Platinum'
@@ -261,6 +305,7 @@ SAVED_QUERIES = {
         LEFT JOIN rental ON customer.customer_id = rental.customer_id
         GROUP BY customer.customer_id, customer.first_name, customer.last_name
         ORDER BY total_rentals DESC;"""),
+
     '17. Monthly Revenue Growth Rate': textwrap.dedent("""
         WITH MonthlyRevenue AS (
             SELECT strftime(CAST(payment_date AS TIMESTAMP), '%Y-%m') AS payment_month, SUM(amount) AS monthly_revenue
@@ -273,6 +318,7 @@ SAVED_QUERIES = {
             FROM MonthlyRevenue
         )
         SELECT payment_month, monthly_revenue, IFNULL(growth_rate, 0) AS growth_rate FROM RevenueGrowth;"""),
+
     '18. Revenue, Cost & ROI by Category': textwrap.dedent("""
         SELECT fc.category_id, c.name AS category_name, SUM(payment.amount) AS total_revenue,
                SUM(f.rental_duration * payment.amount) AS total_cost,
@@ -286,6 +332,7 @@ SAVED_QUERIES = {
         JOIN category c ON fc.category_id = c.category_id
         GROUP BY fc.category_id, c.name
         ORDER BY profit DESC;"""),
+
     '19. Rental Patterns Over Time': textwrap.dedent("""
         WITH RentalPatterns AS (
             SELECT strftime(CAST(rental_date AS TIMESTAMP), '%Y-%m') AS rental_month, COUNT(rental_id) AS rental_count
@@ -295,6 +342,7 @@ SAVED_QUERIES = {
         SELECT rental_month, rental_count, LAG(rental_count) OVER (ORDER BY rental_month) AS prev_rental_count,
                (rental_count - LAG(rental_count) OVER (ORDER BY rental_month)) AS rental_growth
         FROM RentalPatterns;"""),
+
     '20. Late Returns Impact on Revenue': textwrap.dedent("""
         SELECT CASE WHEN date_diff('day', CAST(r.rental_date AS DATE), CAST(r.return_date AS DATE)) > f.rental_duration THEN 'Late' ELSE 'On Time' END AS return_status,
                COUNT(r.rental_id) AS rental_count, SUM(p.amount) AS total_revenue
@@ -303,6 +351,7 @@ SAVED_QUERIES = {
         JOIN inventory i ON r.inventory_id = i.inventory_id
         JOIN film f ON i.film_id = f.film_id
         GROUP BY return_status;"""),
+
     '21. Most Popular Genres by Rentals': textwrap.dedent("""
         SELECT category.name AS genre, COUNT(rental.rental_id) AS rental_count
         FROM rental
@@ -311,12 +360,14 @@ SAVED_QUERIES = {
         JOIN film_category ON film.film_id = film_category.film_id
         JOIN category ON film_category.category_id = category.category_id
         GROUP BY genre ORDER BY rental_count DESC;"""),
+
     '22. Return Patterns by Day of Week': textwrap.dedent("""
         SELECT DAYNAME(return_date) AS day_of_week, COUNT(rental_id) AS rental_count
         FROM rental
         WHERE return_date IS NOT NULL
         GROUP BY day_of_week
         ORDER BY FIELD(day_of_week, 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday');"""),
+
     '23. Revenue by City': textwrap.dedent("""
         SELECT city.city, SUM(payment.amount) AS total_revenue
         FROM payment
@@ -327,6 +378,7 @@ SAVED_QUERIES = {
         JOIN city ON address.city_id = city.city_id
         GROUP BY city.city
         ORDER BY total_revenue DESC;"""),
+
     '24. Most Profitable Actors': textwrap.dedent("""
         SELECT a.actor_id, a.first_name, a.last_name, SUM(payment.amount) AS total_revenue
         FROM actor a
@@ -337,6 +389,7 @@ SAVED_QUERIES = {
         JOIN payment ON rental.rental_id = payment.rental_id
         GROUP BY a.actor_id, a.first_name, a.last_name
         ORDER BY total_revenue DESC;"""),
+
     '25. Film Availability & Demand (top 500)': textwrap.dedent("""
         SELECT f.title AS film_title, COUNT(i.inventory_id) AS available_copies, COUNT(r.rental_id) AS rental_count
         FROM film f
@@ -364,14 +417,51 @@ if load_button or should_auto_load:
 
     st.sidebar.success(f"Loaded {len(dfs)} CSV files: {', '.join(list(dfs.keys())[:10])}")
 
+    # Diagnostics (show table names + sample columns)
+    st.sidebar.markdown("### Loaded tables (preview)")
+    for name, df in dfs.items():
+        st.sidebar.markdown(f"**{name}** — {df.shape[0]} rows, {df.shape[1]} cols")
+        # show up to first 20 column names
+        cols_preview = ", ".join([str(c) for c in df.columns[:20]]) + (", ..." if df.shape[1] > 20 else "")
+        st.sidebar.text(cols_preview)
+
+    if show_raw:
+        st.markdown("### Raw tables (first 5 rows)")
+        for name, df in dfs.items():
+            st.markdown(f"**{name}**")
+            st.dataframe(df.head(5))
+
     # discover tables (helpers)
     table_names = list(dfs.keys())
     lower_names = [n.lower() for n in table_names]
 
-    def get_table(candidates: list[str]) -> str | None:
+    def get_table(candidates: list[str]) -> Optional[str]:
+        """
+        Robust table finder:
+          1) exact match (case-insensitive)
+          2) sanitized match (lower + underscores)
+          3) substring match
+        Returns the original table name key from dfs if found, else None.
+        """
+        # exact match
         for cand in candidates:
+            low = cand.lower()
+            for name in table_names:
+                if name.lower() == low:
+                    return name
+
+        # sanitized match
+        for cand in candidates:
+            low = cand.lower().replace(' ', '_')
+            for name in table_names:
+                if name.lower().replace(' ', '_') == low:
+                    return name
+
+        # substring match
+        for cand in candidates:
+            low = cand.lower()
             for i, n in enumerate(lower_names):
-                if cand in n:
+                if low in n:
                     return table_names[i]
         return None
 
@@ -404,7 +494,7 @@ if load_button or should_auto_load:
 
     tabs = st.tabs(["Overview", "Customers", "Rentals & Stores", "Categories & Films", "Revenue", "Actors", "Advanced SQL"])
 
-    # Overview
+    # ------------------------- Overview tab -------------------------
     with tabs[0]:
         st.header("Overview & Dataset Health")
         counts_df = pd.DataFrame(row_counts.items(), columns=["table", "rows"]).sort_values('rows', ascending=False)
@@ -426,21 +516,26 @@ if load_button or should_auto_load:
                 c2.metric("Total revenue", f"{mc.get('total_revenue', 0):,.2f}")
                 c3.metric("Avg payment", f"{mc.get('avg_payment', 0):,.2f}")
 
-    # Customers
+    # ------------------------- Customers tab -------------------------
     with tabs[1]:
         st.header("Customers & Top Spenders")
         customer_tbl = get_table(['customer'])
         payment_tbl = get_table(['payment'])
+
         if customer_tbl and payment_tbl:
             q = f"SELECT (c.first_name || ' ' || c.last_name) AS fullname, p.customer_id, SUM(p.amount) AS total_spent FROM \"{payment_tbl}\" p JOIN \"{customer_tbl}\" c USING (customer_id) GROUP BY p.customer_id, fullname ORDER BY total_spent DESC LIMIT 500"
             df_top = run_sql(con, q)
             st.subheader("Top customers — table")
             st.dataframe(df_top.head(max_rows_preview))
+
             if not df_top.empty:
                 safe_plotly(px.bar(df_top.head(25), x='total_spent', y='fullname', orientation='h', title='Top 25 customers by spend'))
                 safe_plotly(px.histogram(df_top, x='total_spent', nbins=30, title='Distribution of total spent (top customers)'))
+
+                # Pareto cumulative line (combined)
                 df_pareto = df_top.sort_values('total_spent', ascending=False).reset_index(drop=True)
-                df_pareto['cum_pct'] = df_pareto['total_spent'].cumsum() / df_pareto['total_spent'].sum()
+                total_sum = df_pareto['total_spent'].sum() if not df_pareto.empty else 1
+                df_pareto['cum_pct'] = df_pareto['total_spent'].cumsum() / total_sum
                 fig_p = make_subplots(specs=[[{"secondary_y": True}]])
                 fig_p.add_trace(go.Bar(x=df_pareto['fullname'].head(30), y=df_pareto['total_spent'].head(30), name='spend'))
                 fig_p.add_trace(go.Scatter(x=df_pareto['fullname'].head(30), y=df_pareto['cum_pct'].head(30), name='cumulative %', yaxis='y2'))
@@ -451,12 +546,13 @@ if load_button or should_auto_load:
         else:
             st.warning('customer or payment table not found — rename or place your csv files with those names in the folder.')
 
-    # Rentals & Stores
+    # ------------------------- Rentals & Stores -------------------------
     with tabs[2]:
         st.header('Rentals — Monthly, By Store & Peak Activity')
         rental_tbl = get_table(['rental'])
         staff_tbl = get_table(['staff'])
         store_tbl = get_table(['store'])
+
         if rental_tbl and staff_tbl and store_tbl:
             q = f"SELECT s.store_id, strftime(CAST(r.rental_date AS TIMESTAMP), '%Y-%m') AS ym, COUNT(r.rental_id) AS rentals FROM \"{rental_tbl}\" r JOIN \"{staff_tbl}\" st ON r.staff_id = st.staff_id JOIN \"{store_tbl}\" s ON st.store_id = s.store_id GROUP BY s.store_id, ym ORDER BY ym"
             df_month = run_sql(con, q)
@@ -464,6 +560,8 @@ if load_button or should_auto_load:
                 df_month['ym_dt'] = pd.to_datetime(df_month['ym'] + '-01', errors='coerce')
                 safe_plotly(px.area(df_month, x='ym_dt', y='rentals', color='store_id', title='Monthly rentals by store'))
                 safe_plotly(px.bar(df_month, x='ym_dt', y='rentals', color='store_id', title='Stacked monthly rentals'))
+
+                # heatmap
                 df_month['year'] = df_month['ym_dt'].dt.year.astype(str)
                 df_month['month'] = df_month['ym_dt'].dt.month
                 pivot = df_month.pivot_table(index='year', columns='month', values='rentals', aggfunc='sum', fill_value=0)
@@ -473,12 +571,13 @@ if load_button or should_auto_load:
         else:
             st.warning('rental/staff/store tables missing — rentals visuals unavailable.')
 
-    # Categories & Films
+    # ------------------------- Categories & Films -------------------------
     with tabs[3]:
         st.header('Film Categories, Quartiles & Family Rentals')
         film_tbl = get_table(['film'])
         film_cat_tbl = get_table(['film_category', 'filmcategory', 'film-category'])
         cat_tbl = get_table(['category'])
+
         if film_tbl and film_cat_tbl and cat_tbl:
             q_quart = f"WITH t1 AS (SELECT f.title AS film_title, c.name AS category_name, ntile(4) OVER (ORDER BY COALESCE(f.rental_duration,0)) AS quart FROM \"{film_tbl}\" f JOIN \"{film_cat_tbl}\" fc ON f.film_id = fc.film_id JOIN \"{cat_tbl}\" c ON fc.category_id = c.category_id) SELECT category_name, quart AS standard_quartile, COUNT(film_title) AS film_count FROM t1 WHERE category_name IN ('Animation','Children','Classics','Comedy','Family','Music') GROUP BY category_name, standard_quartile ORDER BY category_name, standard_quartile"
             df_quart = run_sql(con, q_quart)
@@ -486,6 +585,7 @@ if load_button or should_auto_load:
             st.dataframe(df_quart.head(500))
             if not df_quart.empty:
                 safe_plotly(px.bar(df_quart, x='standard_quartile', y='film_count', color='category_name', barmode='group', title='Film counts by quartile & category'))
+
             inv_tbl = get_table(['inventory'])
             rental_tbl_local = get_table(['rental'])
             if inv_tbl and rental_tbl_local:
@@ -497,7 +597,7 @@ if load_button or should_auto_load:
         else:
             st.warning('film or film_category or category tables missing — category visuals limited.')
 
-    # Revenue
+    # ------------------------- Revenue -------------------------
     with tabs[4]:
         st.header('Revenue: Trends, Categories & Late Returns')
         pay_tbl = get_table(['payment'])
@@ -507,6 +607,8 @@ if load_button or should_auto_load:
             if not df_rev.empty:
                 df_rev['ym_dt'] = pd.to_datetime(df_rev['ym'] + '-01', errors='coerce')
                 safe_plotly(px.line(df_rev, x='ym_dt', y='revenue', markers=True, title='Monthly revenue'))
+
+                # moving averages
                 df_rev = df_rev.sort_values('ym_dt')
                 df_rev['ma_3'] = df_rev['revenue'].rolling(3, min_periods=1).mean()
                 df_rev['ma_6'] = df_rev['revenue'].rolling(6, min_periods=1).mean()
@@ -516,6 +618,7 @@ if load_button or should_auto_load:
                 fig_ma.add_trace(go.Scatter(x=df_rev['ym_dt'], y=df_rev['ma_6'], name='6-mo MA', line=dict(dash='dot')))
                 fig_ma.update_layout(title='Revenue with moving averages')
                 safe_plotly(fig_ma)
+
         # revenue by category
         if all([pay_tbl, film_tbl, film_cat_tbl, cat_tbl, get_table(['inventory']), get_table(['rental'])]):
             inv = get_table(['inventory'])
@@ -527,6 +630,7 @@ if load_button or should_auto_load:
             if not df_cat_rev.empty:
                 safe_plotly(px.bar(df_cat_rev.head(12), x='category_name', y='total_revenue', title='Top categories by revenue'))
                 safe_plotly(px.violin(df_cat_rev, y='total_revenue', box=True, points='all', title='Revenue distribution by category'))
+
         # late returns impact
         rent = get_table(['rental'])
         if all([rent, pay_tbl, film_tbl, get_table(['inventory'])]):
@@ -536,7 +640,7 @@ if load_button or should_auto_load:
             if not df_late.empty:
                 safe_plotly(px.box(df_late, x='return_status', y='amount', title='Payment amount distribution by return status'))
 
-    # Actors
+    # ------------------------- Actors -------------------------
     with tabs[5]:
         st.header('Actors — revenue & flows')
         actor_tbl = get_table(['actor'])
@@ -544,6 +648,7 @@ if load_button or should_auto_load:
         inv_tbl = get_table(['inventory'])
         rent_tbl = get_table(['rental'])
         pay_tbl = get_table(['payment'])
+
         if all([actor_tbl, film_actor_tbl, inv_tbl, rent_tbl, pay_tbl, film_tbl, film_cat_tbl, cat_tbl]):
             q_actor = f"SELECT a.actor_id, a.first_name, a.last_name, SUM(p.amount) AS total_revenue FROM \"{actor_tbl}\" a JOIN \"{film_actor_tbl}\" fa ON a.actor_id = fa.actor_id JOIN \"{film_tbl}\" f ON fa.film_id = f.film_id JOIN \"{inv_tbl}\" i ON f.film_id = i.film_id JOIN \"{rent_tbl}\" r ON i.inventory_id = r.inventory_id JOIN \"{pay_tbl}\" p ON r.rental_id = p.rental_id GROUP BY a.actor_id, a.first_name, a.last_name ORDER BY total_revenue DESC LIMIT 200"
             df_actor = run_sql(con, q_actor)
@@ -551,6 +656,8 @@ if load_button or should_auto_load:
             if not df_actor.empty:
                 st.dataframe(df_actor.head(max_rows_preview))
                 safe_plotly(px.bar(df_actor.head(40), x='last_name', y='total_revenue', hover_data=['first_name'], title='Top actors by revenue'))
+
+                # Sankey sample
                 q_sankey = f"SELECT (a.first_name || ' ' || a.last_name) AS actor_name, c.name AS category_name, SUM(p.amount) AS revenue FROM \"{actor_tbl}\" a JOIN \"{film_actor_tbl}\" fa ON a.actor_id = fa.actor_id JOIN \"{film_tbl}\" f ON fa.film_id = f.film_id JOIN \"{film_cat_tbl}\" fc ON f.film_id = fc.film_id JOIN \"{cat_tbl}\" c ON fc.category_id = c.category_id JOIN \"{inv_tbl}\" i ON f.film_id = i.film_id JOIN \"{rent_tbl}\" r ON i.inventory_id = r.inventory_id JOIN \"{pay_tbl}\" p ON r.rental_id = p.rental_id GROUP BY actor_name, category_name ORDER BY revenue DESC LIMIT 500"
                 df_sankey = run_sql(con, q_sankey)
                 if not df_sankey.empty:
@@ -566,6 +673,7 @@ if load_button or should_auto_load:
                     safe_plotly(sankey)
         else:
             st.info('Actor analysis unavailable — some actor/film_actor/inventory/rental/payment tables are missing.')
+
         # availability vs demand
         if film_tbl and inv_tbl and rent_tbl:
             q_avail = f"SELECT f.title AS film_title, COUNT(i.inventory_id) AS available_copies, COUNT(r.rental_id) AS rental_count FROM \"{film_tbl}\" f LEFT JOIN \"{inv_tbl}\" i ON f.film_id = i.film_id LEFT JOIN \"{rent_tbl}\" r ON i.inventory_id = r.inventory_id GROUP BY film_title ORDER BY rental_count DESC, available_copies DESC LIMIT 500"
@@ -575,7 +683,7 @@ if load_button or should_auto_load:
                 st.dataframe(df_avail.head(200))
                 safe_plotly(px.scatter(df_avail, x='available_copies', y='rental_count', size='rental_count', hover_data=['film_title'], title='Availability vs Demand'))
 
-    # Advanced SQL & Saved Queries (wired all 25 above)
+    # ------------------------- Advanced SQL & Saved Queries -------------------------
     with tabs[6]:
         st.header('Advanced — SQL Explorer & Saved Queries')
         st.markdown('Run ad-hoc SQL against DuckDB. Click any saved query button to run it.')
@@ -629,7 +737,7 @@ if load_button or should_auto_load:
                         except Exception as e:
                             st.error(f'Plot error: {e}')
 
-    # Export
+    # ------------------------- Export -------------------------
     st.sidebar.markdown('---')
     if st.sidebar.button('Export tables to CSV'):
         export_dir = os.path.join(folder, 'exported_tables')
